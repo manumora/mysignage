@@ -108,16 +108,18 @@ class ContentItem:
             # Para ventanas de video que fueron ocultadas, necesitamos mostrarlas de nuevo
             if self.type == "video":
                 try:
-                    # Mostrar la ventana (para contrarrestar windowunmap)
-                    subprocess.run(f"xdotool windowmap {self.window_id}", shell=True)
-                    time.sleep(0.3)  # Esperar a que se muestre
+                    # Mostrar la ventana ocultada (desactivar el estado hidden)
+                    subprocess.run(f"DISPLAY=:0 wmctrl -r \"VLC media player\" -b remove,hidden", shell=True)
+                    time.sleep(0.5)  # Esperar a que se muestre
                     
                     # Activar la ventana
-                    subprocess.run(f"xdotool windowactivate {self.window_id}", shell=True)
-                    time.sleep(0.3)
+                    subprocess.run(f"DISPLAY=:0 xdotool windowactivate {self.window_id}", shell=True)
+                    time.sleep(0.5)
                     
-                    # Reanudar la reproducción del video
-                    subprocess.run(f"xdotool key --window {self.window_id} space", shell=True)
+                    # Reanudar la reproducción y poner a pantalla completa
+                    subprocess.run(f"DISPLAY=:0 xdotool key --window {self.window_id} space", shell=True)
+                    time.sleep(0.3)
+                    subprocess.run(f"DISPLAY=:0 xdotool key --window {self.window_id} f", shell=True)
                     logger.info(f"Ventana de video restaurada y reproducción reanudada: {self.path}")
                     return
                 except Exception as e:
@@ -151,6 +153,9 @@ class ContentItem:
             return
             
         try:
+            # Asegurar que el comando se ejecute en la pantalla correcta
+            if not cmd.startswith("DISPLAY="):
+                cmd = f"DISPLAY=:0 {cmd}"
             self.process = subprocess.Popen(cmd, shell=True)
             # Esperar un poco para que la ventana se abra
             time.sleep(3)  # Aumentado de 2 a 3 segundos
@@ -164,7 +169,7 @@ class ContentItem:
         if self.window_id:
             try:
                 # Verificar que la ventana existe antes de minimizarla
-                check_cmd = f"xdotool getwindowname {self.window_id} 2>/dev/null || echo 'No existe'"
+                check_cmd = f"DISPLAY=:0 xdotool getwindowname {self.window_id} 2>/dev/null || echo 'No existe'"
                 check_result = subprocess.check_output(check_cmd, shell=True, text=True).strip()
                 
                 if check_result == 'No existe':
@@ -175,33 +180,29 @@ class ContentItem:
                 # Si es un video, pausar la reproducción antes de ocultarlo
                 if self.type == "video":
                     # Asegurar que la ventana esté activa antes de enviar comandos
-                    subprocess.run(f"xdotool windowactivate {self.window_id}", shell=True)
-                    time.sleep(0.2)  # Pequeña pausa para asegurar que se active
+                    subprocess.run(f"DISPLAY=:0 xdotool windowactivate {self.window_id}", shell=True)
+                    time.sleep(0.3)  # Pequeña pausa para asegurar que se active
                     
                     # Enviar tecla de espacio para pausar VLC
-                    subprocess.run(f"xdotool key --window {self.window_id} space", shell=True)
+                    subprocess.run(f"DISPLAY=:0 xdotool key --window {self.window_id} space", shell=True)
                     logger.info(f"Video pausado: {self.path}")
-                    time.sleep(0.3)  # Esperar a que se procese la pausa
+                    time.sleep(0.3)
                     
-                    # Ocultar completamente la ventana de VLC 
-                    cmd = f"xdotool windowunmap {self.window_id}"
-                    subprocess.run(cmd, shell=True)
+                    # Salir del modo pantalla completa primero (tecla Escape)
+                    subprocess.run(f"DISPLAY=:0 xdotool key --window {self.window_id} Escape", shell=True)
+                    time.sleep(0.5)
                     
-                    # Verificar si la ventana se ocultó correctamente
-                    check_visible = f"xdotool search --onlyvisible --name {self.window_id} 2>/dev/null || echo ''"
-                    result = subprocess.check_output(check_visible, shell=True, text=True).strip()
-                    if result:
-                        # Si la ventana sigue visible, forzar minimización
-                        subprocess.run(f"xdotool windowminimize {self.window_id}", shell=True)
+                    # Ocultar la ventana de VLC usando wmctrl
+                    subprocess.run(f"DISPLAY=:0 wmctrl -r \"VLC media player\" -b add,hidden", shell=True)
                     
                     logger.info(f"Ventana de video ocultada: {self.path} (ID: {self.window_id})")
                 else:
                     # Para otras ventanas, continuar con la minimización normal
                     # Asegurar que la ventana esté activa antes de minimizarla
-                    subprocess.run(f"xdotool windowactivate {self.window_id}", shell=True)
+                    subprocess.run(f"DISPLAY=:0 xdotool windowactivate {self.window_id}", shell=True)
                     time.sleep(0.3)  # Pequeña pausa para asegurar que se active
                     
-                    cmd = f"xdotool windowminimize {self.window_id}"
+                    cmd = f"DISPLAY=:0 xdotool windowminimize {self.window_id}"
                     subprocess.run(cmd, shell=True)
                     logger.info(f"Ventana minimizada: {self.path} (ID: {self.window_id})")
                 
@@ -282,29 +283,32 @@ class SignageManager:
     def update_content(self):
         """Actualiza la lista de contenido según el archivo externo"""
         while self.running:
-            current_content = self.read_content_file()  # Ahora devuelve un diccionario {path: duration}
-            
-            # Cerrar elementos que ya no están en la lista
-            paths_to_remove = set(self.content_items.keys()) - set(current_content.keys())
-            for path in paths_to_remove:
-                self.content_items[path].close()
-                del self.content_items[path]
-                logger.info(f"Elemento eliminado: {path}")
+            try:
+                current_content = self.read_content_file()  # Ahora devuelve un diccionario {path: duration}
                 
-            # Añadir nuevos elementos o actualizar duraciones
-            for path, duration in current_content.items():
-                if path not in self.content_items:
-                    self.content_items[path] = ContentItem(path, duration)
-                    logger.info(f"Nuevo elemento añadido: {path} (duración: {duration}s)")
-                else:
-                    # Actualizar duración si ha cambiado
-                    if self.content_items[path].duration != duration:
-                        self.content_items[path].duration = duration
-                        logger.info(f"Duración actualizada para {path}: {duration}s")
-            
-            # Señalizar que hay contenido disponible si se encontraron elementos
-            if self.content_items and not self.content_available.is_set():
-                self.content_available.set()
+                # Cerrar elementos que ya no están en la lista
+                paths_to_remove = set(self.content_items.keys()) - set(current_content.keys())
+                for path in paths_to_remove:
+                    self.content_items[path].close()
+                    del self.content_items[path]
+                    logger.info(f"Elemento eliminado: {path}")
+                    
+                # Añadir nuevos elementos o actualizar duraciones
+                for path, duration in current_content.items():
+                    if path not in self.content_items:
+                        self.content_items[path] = ContentItem(path, duration)
+                        logger.info(f"Nuevo elemento añadido: {path} (duración: {duration}s)")
+                    else:
+                        # Actualizar duración si ha cambiado
+                        if self.content_items[path].duration != duration:
+                            self.content_items[path].duration = duration
+                            logger.info(f"Duración actualizada para {path}: {duration}s")
+                
+                # Señalizar que hay contenido disponible si se encontraron elementos
+                if self.content_items and not self.content_available.is_set():
+                    self.content_available.set()
+            except Exception as e:
+                logger.error(f"Error en update_content: {str(e)}")
                 
             time.sleep(self.read_interval)
     
@@ -321,18 +325,6 @@ class SignageManager:
                 if not self.content_items:
                     continue
             
-            # Si hay un elemento activo, minimizarlo en lugar de cerrarlo
-            if self.current_item:
-                logger.info(f"Preparando transición desde: {self.current_item.path}")
-                minimized = self.current_item.minimize()
-                if not minimized:
-                    # Si no se pudo minimizar, podemos intentar cerrarlo
-                    logger.warning(f"No se pudo minimizar {self.current_item.path}, intentando cerrar")
-                    self.current_item.close()
-                
-                # Pausa más larga después de minimizar para permitir que el escritorio se muestre
-                time.sleep(1.5)  # Incrementado para permitir la transición
-            
             # Seleccionar el siguiente elemento
             items = list(self.content_items.values())
             if not items:
@@ -346,8 +338,18 @@ class SignageManager:
                 current_index = items.index(self.current_item)
                 index = (current_index + 1) % len(items)
                 
-            self.current_item = items[index]
-            self.current_item.open(self.config)
+            next_item = items[index]
+            
+            # Primero abrir la nueva ventana antes de minimizar la actual
+            # para evitar mostrar el escritorio
+            next_item.open(self.config)
+            
+            # Solo después de abrir la nueva ventana, minimizar la anterior
+            if self.current_item:
+                logger.info(f"Transición de {self.current_item.path} a {next_item.path}")
+                self.current_item.minimize()
+            
+            self.current_item = next_item
             
             # Usar la duración específica del elemento o el valor predeterminado
             display_time = self.current_item.duration if self.current_item.duration else self.rotation_interval
