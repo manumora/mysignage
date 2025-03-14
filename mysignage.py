@@ -66,8 +66,10 @@ class ContentItem:
                 result = subprocess.check_output(cmd, shell=True, text=True)
                 window_id = result.strip()
             else:
-                # Para ventanas de Chrome (URLs e imágenes)
-                cmd = "xdotool search --onlyvisible --class Chrome | tail -1"
+                # Para ventanas de Chrome/Chromium (URLs e imágenes)
+                browser_type = config.get('browser', 'type').lower()
+                browser_class = "Chrome" if browser_type == "chrome" else "Chromium"
+                cmd = f"xdotool search --onlyvisible --class {browser_class} | tail -1"
                 result = subprocess.check_output(cmd, shell=True, text=True)
                 window_id = result.strip()
                 
@@ -130,16 +132,20 @@ class ContentItem:
             
         # Si necesitamos abrir una nueva ventana
         if self.type == "url":
-            cmd = config.get('commands', 'chrome_cmd').format(url=self.path)
-            logger.info(f"Abriendo URL: {self.path}")
+            browser_type = config.get('browser', 'type').lower()
+            cmd_key = f"{browser_type}_cmd"
+            cmd = config.get('commands', cmd_key).format(url=self.path)
+            logger.info(f"Abriendo URL con {browser_type}: {self.path}")
         elif self.type == "video":
             cmd = config.get('commands', 'vlc_cmd').format(video=self.path)
             logger.info(f"Reproduciendo video: {self.path}")
         elif self.type == "image":
             # Para imágenes, creamos una URL de archivo local
             file_url = f"file://{os.path.abspath(self.path)}"
-            cmd = config.get('commands', 'chrome_cmd').format(url=file_url)
-            logger.info(f"Mostrando imagen: {self.path}")
+            browser_type = config.get('browser', 'type').lower()
+            cmd_key = f"{browser_type}_cmd"
+            cmd = config.get('commands', cmd_key).format(url=file_url)
+            logger.info(f"Mostrando imagen con {browser_type}: {self.path}")
         else:
             logger.warning(f"Tipo de contenido desconocido: {self.path}")
             return
@@ -177,9 +183,17 @@ class ContentItem:
                     logger.info(f"Video pausado: {self.path}")
                     time.sleep(0.3)  # Esperar a que se procese la pausa
                     
-                    # Ocultar completamente la ventana de VLC en lugar de minimizarla
+                    # Ocultar completamente la ventana de VLC 
                     cmd = f"xdotool windowunmap {self.window_id}"
                     subprocess.run(cmd, shell=True)
+                    
+                    # Verificar si la ventana se ocultó correctamente
+                    check_visible = f"xdotool search --onlyvisible --name {self.window_id} 2>/dev/null || echo ''"
+                    result = subprocess.check_output(check_visible, shell=True, text=True).strip()
+                    if result:
+                        # Si la ventana sigue visible, forzar minimización
+                        subprocess.run(f"xdotool windowminimize {self.window_id}", shell=True)
+                    
                     logger.info(f"Ventana de video ocultada: {self.path} (ID: {self.window_id})")
                 else:
                     # Para otras ventanas, continuar con la minimización normal
@@ -217,6 +231,10 @@ class SignageManager:
         self.config = configparser.ConfigParser()
         self.config.read(config_path)
         
+        # Configurar variable global para ContentItem
+        global config
+        config = self.config
+        
         self.content_file = self.config.get('general', 'content_file')
         self.read_interval = self.config.getint('general', 'read_interval')
         self.rotation_interval = self.config.getint('general', 'rotation_interval')
@@ -224,6 +242,9 @@ class SignageManager:
         self.content_items = {}  # Diccionario para mantener los elementos actuales
         self.current_item = None
         self.running = True
+        
+        # Añadir evento para señalizar cuando hay contenido disponible
+        self.content_available = threading.Event()
         
         # Inicializar mimetypes
         mimetypes.init()
@@ -280,19 +301,29 @@ class SignageManager:
                     if self.content_items[path].duration != duration:
                         self.content_items[path].duration = duration
                         logger.info(f"Duración actualizada para {path}: {duration}s")
+            
+            # Señalizar que hay contenido disponible si se encontraron elementos
+            if self.content_items and not self.content_available.is_set():
+                self.content_available.set()
                 
             time.sleep(self.read_interval)
     
     def rotate_content(self):
         """Rota entre los elementos de contenido disponibles"""
         while self.running:
+            # Esperar a que haya contenido disponible (o salir si termina el programa)
             if not self.content_items:
                 logger.warning("No hay elementos de contenido disponibles")
-                time.sleep(self.rotation_interval)
-                continue
-                
+                # Esperar hasta que haya contenido o timeout cada segundo para comprobar self.running
+                self.content_available.wait(1)
+                if not self.running:
+                    break
+                if not self.content_items:
+                    continue
+            
             # Si hay un elemento activo, minimizarlo en lugar de cerrarlo
             if self.current_item:
+                logger.info(f"Preparando transición desde: {self.current_item.path}")
                 minimized = self.current_item.minimize()
                 if not minimized:
                     # Si no se pudo minimizar, podemos intentar cerrarlo
@@ -300,12 +331,12 @@ class SignageManager:
                     self.current_item.close()
                 
                 # Pausa más larga después de minimizar para permitir que el escritorio se muestre
-                #time.sleep(1)  # Incrementado para dar tiempo a que se complete la transición
+                time.sleep(1.5)  # Incrementado para permitir la transición
             
             # Seleccionar el siguiente elemento
             items = list(self.content_items.values())
             if not items:
-                time.sleep(self.rotation_interval)
+                time.sleep(1)  # Espera corta si de alguna manera no hay items
                 continue
                 
             # Si el elemento actual es el último, volver al primero
@@ -328,6 +359,15 @@ class SignageManager:
         """Inicia el gestor de signage"""
         logger.info("Iniciando MySignage")
         
+        # Verificar contenido inicial inmediatamente antes de iniciar hilos
+        initial_content = self.read_content_file()
+        for path, duration in initial_content.items():
+            self.content_items[path] = ContentItem(path, duration)
+            logger.info(f"Nuevo elemento añadido: {path} (duración: {duration}s)")
+            
+        if self.content_items:
+            self.content_available.set()
+        
         # Iniciar hilo de actualización de contenido
         update_thread = threading.Thread(target=self.update_content)
         update_thread.daemon = True
@@ -345,6 +385,7 @@ class SignageManager:
         except KeyboardInterrupt:
             logger.info("Cerrando MySignage")
             self.running = False
+            self.content_available.set()  # Permitir que los hilos de espera salgan
             
             # Cerrar todos los procesos
             for item in self.content_items.values():
