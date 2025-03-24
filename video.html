@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background: black;
+        }
+        video {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+        }
+    </style>
+</head>
+<body>
+    <video id="videoPlayer" autoplay muted></video>
+
+    <script>
+        const videoPlayer = document.getElementById('videoPlayer');
+        const videos = [
+            'NavidadesCarretero2024.mp4'
+        ];
+        let currentIndex = 0;
+
+        // Reproducir el primer video
+        videoPlayer.src = videos[currentIndex];
+        videoPlayer.load();
+        videoPlayer.play();
+
+        // Cuando termina un video, reproducir el siguiente
+        videoPlayer.addEventListener('ended', () => {
+            currentIndex = (currentIndex + 1) % videos.length;
+            videoPlayer.src = videos[currentIndex];
+            videoPlayer.load();
+            videoPlayer.play();
+        });
+
+        // Entrar automáticamente en modo pantalla completa
+        document.addEventListener('DOMContentLoaded', () => {
+            if (videoPlayer.requestFullscreen) {
+                videoPlayer.requestFullscreen();
+            } else if (videoPlayer.webkitRequestFullscreen) {
+                videoPlayer.webkitRequestFullscreen();
+            } else if (videoPlayer.msRequestFullscreen) {
+                videoPlayer.msRequestFullscreen();
+            }
+        });
+        
+        window.addEventListener('blur', () => {
+            videoPlayer.pause();
+        });
+
+        window.addEventListener('focus', () => {
+            videoPlayer.play();
+        });
+    </script>
+</body>
+</html>
